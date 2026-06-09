@@ -1,0 +1,264 @@
+verilog code:
+module s2c_interrupt_controller(
+  input wire enable,
+  input wire clock,
+  input wire reset,
+  input wire power_in,
+  input wire [1:0]edge_detection_mode,
+  input wire external_wakeup_interrupt,
+  input wire overflow_int,
+  input wire match_int,
+  output reg wakeup_interrupt,
+  output wire clock_req,
+  output wire power_req
+);
+  
+  wire timer_int;
+  reg timer_int_d;
+  
+  assign power_req = enable;
+  
+  assign clock_req = power_in & enable;
+  
+  assign timer_int = overflow_int || match_int ||  external_wakeup_interrupt;
+  always@(posedge clock or posedge reset or negedge enable) begin
+    if(reset || !enable || !power_in) begin
+      wakeup_interrupt = 1'd0;
+      timer_int_d = 1'b0;
+    end
+    else begin
+      timer_int_d <= timer_int;
+      
+      case(edge_detection_mode)
+        2'b01: wakeup_interrupt <= timer_int & ~timer_int_d;
+        2'b10: wakeup_interrupt <= ~timer_int & timer_int_d;
+        2'b11: wakeup_interrupt <= (timer_int ^ timer_int_d);
+        default:wakeup_interrupt <= 1'b0;
+      endcase
+    end
+  end
+endmodule
+  
+  
+  testbench code:
+mailbox mb=new();
+mailbox mb2=new();
+
+class common;
+  static int num=20;
+endclass
+
+class interrupt_tx;
+  rand bit enable;
+  rand bit power_in;
+  rand bit [1:0]edge_detection_mode;
+  rand bit external_wakeup_interrupt;
+  rand bit overflow_int;
+  rand bit match_int;
+  bit wakeup_interrupt;
+  
+  constraint c1{enable==1;
+                power_in==1;}
+endclass
+
+class generator;
+  interrupt_tx tx;
+  
+  task run();
+    repeat(common::num) begin
+      tx=new();
+      tx.randomize() with {edge_detection_mode inside {[1:3]};};
+      mb.put(tx);
+    end
+  endtask
+endclass
+
+interface intf(input reg clk,rst);
+  logic enable;
+  logic power_in;
+  logic [1:0]edge_detection_mode;
+  logic external_wakeup_interrupt;
+  logic overflow_int;
+  logic match_int;
+  logic wakeup_interrupt;
+  logic power_req;
+  logic clock_req;
+  
+  clocking bfm_cb@(posedge clk);
+    default input #0 output #1;
+    output  enable,power_in,edge_detection_mode,external_wakeup_interrupt,overflow_int,match_int;
+    input wakeup_interrupt;
+  endclocking
+  
+  clocking mon_cb@(posedge clk);
+    default input #0;
+    input enable,power_in,edge_detection_mode,external_wakeup_interrupt,overflow_int,match_int,wakeup_interrupt;
+  endclocking
+endinterface
+
+class bfm;
+  interrupt_tx tx;
+  virtual intf vif;
+  
+  function new();
+    vif=top.pif;
+  endfunction
+  
+  task run();
+    repeat(common::num) begin
+      mb.get(tx);
+      @(vif.bfm_cb);
+      vif.bfm_cb.enable <= tx.enable;
+      vif.bfm_cb.power_in <= tx.power_in;
+      vif.bfm_cb.edge_detection_mode <= tx.edge_detection_mode;
+      vif.bfm_cb.external_wakeup_interrupt <= tx.external_wakeup_interrupt;
+      vif.bfm_cb.overflow_int <= tx.overflow_int;
+      vif.bfm_cb.match_int <= tx.match_int;
+      $display("bfm-tx=%p",tx);
+    end
+  endtask
+endclass
+
+
+class monitor;
+  interrupt_tx tx;
+  virtual intf vif;
+  
+  function new();
+    vif=top.pif;
+  endfunction
+  
+  task run();
+    repeat(common::num) begin
+      @(vif.mon_cb);
+      tx=new();
+      tx.enable = vif.mon_cb.enable;
+      tx.power_in = vif.mon_cb.power_in; 
+      tx.edge_detection_mode = vif.mon_cb.edge_detection_mode;
+      tx.external_wakeup_interrupt = vif.mon_cb.external_wakeup_interrupt;
+      tx.overflow_int = vif.mon_cb.overflow_int;
+      tx.match_int = vif.mon_cb.match_int;
+      tx.wakeup_interrupt = vif.mon_cb.wakeup_interrupt;
+      $display("mon-tx=%p",tx);
+      mb2.put(tx);
+      end
+  endtask
+endclass
+
+class scoreboard;
+  interrupt_tx tx;
+  bit timer,prev_timer;
+
+  bit ref_wakeup, ref_wakeup_d;
+  
+  task run();
+    repeat(common::num) begin
+      mb2.get(tx);
+      timer= tx.overflow_int || tx.match_int ||  tx.external_wakeup_interrupt;
+      ref_wakeup = 0;
+      if( !tx.enable || !tx.power_in) begin
+         prev_timer = 0;
+        ref_wakeup = 0;
+        ref_wakeup_d=0;
+      end
+      else begin
+        case(tx.edge_detection_mode)
+        2'b01: ref_wakeup = timer & ~prev_timer;
+        2'b10: ref_wakeup = ~timer & prev_timer;
+        2'b11: ref_wakeup = timer ^ prev_timer;
+        default: ref_wakeup = 0 ;
+        endcase
+        prev_timer = timer;  
+      end
+      if(ref_wakeup == tx.wakeup_interrupt) 
+        
+        $display("test passed: reference=%0b, actual=%0b",ref_wakeup,tx.wakeup_interrupt);
+      else 
+        $display("test failed: referance=%0b, actual=%0b",ref_wakeup,tx.wakeup_interrupt);
+    end
+  endtask
+  
+endclass
+
+class agent;
+  generator g;
+  bfm b;
+  monitor m;
+  task run();
+    g=new();
+    b=new();
+    m=new();
+    fork
+      g.run();
+      b.run();
+      m.run();
+    join
+  endtask
+endclass
+
+class environment;
+  agent a;
+  scoreboard s;
+  
+  task run();
+    a=new();
+    s=new();
+    fork
+      a.run();
+      s.run();
+    join
+  endtask
+endclass
+
+module top;
+  reg clk,rst;
+  environment e;
+  intf pif(clk,rst);
+  
+  s2c_interrupt_controller dut(.enable(pif.enable),
+                               .clock(pif.clk),
+                               .reset(pif.rst),
+                               .power_in(pif.power_in),
+                               .edge_detection_mode(pif.edge_detection_mode),
+                               .external_wakeup_interrupt(pif.external_wakeup_interrupt),
+                               .overflow_int(pif.overflow_int),
+                               .match_int(pif.match_int),
+                               .wakeup_interrupt(pif.wakeup_interrupt),
+                               .clock_req(pif.clock_req),
+                               .power_req(pif.power_req));
+  
+  initial begin
+    clk=1'b0;
+    forever #4 clk=~clk;
+  end
+  
+  initial begin
+    rst=1;
+    reset_signals();
+    repeat(2)@(posedge clk);
+    rst=0;
+    e = new();
+    e.run();
+  end
+  
+  task reset_signals();
+    pif.enable = 0;
+    pif.power_in =0 ;
+    pif.edge_detection_mode=0;
+    pif.external_wakeup_interrupt= 0;
+    pif.overflow_int =0;
+    pif.match_int=0;
+  endtask
+  
+  initial begin
+    #400;
+    $finish;
+  end
+ 
+  initial begin
+    $dumpfile("dump.vcd");
+    $dumpvars();
+  end
+                               
+endmodule
+  
